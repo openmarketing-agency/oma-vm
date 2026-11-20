@@ -1,0 +1,54 @@
+name: Release OMA VM
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: ${{ !github.event.deleted }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DOCKER_BUILDKIT: '1'
+      IMAGE_REPOSITORY: ghcr.io/openmarketing-agency/oma-vm
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Build tagged VM image
+        shell: bash
+        run: |
+          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          bash scripts/build.sh "$IMAGE_REPOSITORY:$GITHUB_REF_NAME"
+
+      - name: Boot and smoke-test the release image offline
+        run: bash tests/smoke.sh "$IMAGE_REPOSITORY:$GITHUB_REF_NAME"
+
+      - name: Publish the tested image to GHCR
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          source versions.env
+          image="$IMAGE_REPOSITORY:$GITHUB_REF_NAME"
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$image"
+          published=$(docker image inspect "$image" --format '{{range .RepoDigests}}{{println .}}{{end}}' | grep -F "$IMAGE_REPOSITORY@sha256:")
+          {
+            printf '### OMA VM %s\n\n' "$GITHUB_REF_NAME"
+            printf -- '- Image: `%s`\n' "$image"
+            printf -- '- Pinned image: `%s`\n' "$published"
+            printf -- '- OMA Agent base: `%s`\n' "$OMA_AGENT_IMAGE"
+            printf -- '- omactl: `%s`\n' "$OMACTL_TAG"
+            printf -- '- OMA playbooks and skills: `%s`\n' "$OMA_SOURCE_COMMIT"
+          } >> "$GITHUB_STEP_SUMMARY"
